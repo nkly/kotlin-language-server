@@ -10,5 +10,5 @@ fun formatKotlinCode(
 ): String = Formatter.format(KtfmtOptions(
     style = KtfmtOptions.Style.GOOGLE,
     blockIndent = options.tabSize,
-    continuationIndent = 2 * options.tabSize
+    continuationIndent = options.tabSize
 ), code)
