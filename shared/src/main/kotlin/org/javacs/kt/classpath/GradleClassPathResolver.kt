@@ -20,7 +20,7 @@ internal class GradleClassPathResolver(private val path: Path, private val inclu
 
         return readDependenciesViaGradleCLI(projectDirectory, scripts, tasks)
             .apply { if (isNotEmpty()) LOG.info("Successfully resolved dependencies for '${projectDirectory.fileName}' using Gradle") }
-            .map { ClassPathEntry(it, null) }.toSet()
+            .toSet()
     }
     override val buildScriptClasspath: Set<Path> get() {
         return if (includeKotlinDSL) {
@@ -29,6 +29,8 @@ internal class GradleClassPathResolver(private val path: Path, private val inclu
 
             return readDependenciesViaGradleCLI(projectDirectory, scripts, tasks)
                 .apply { if (isNotEmpty()) LOG.info("Successfully resolved build script dependencies for '${projectDirectory.fileName}' using Gradle") }
+                .map { it.compiledJar }
+                .toSet()
         } else {
             emptySet()
         }
@@ -73,7 +75,7 @@ private fun getGradleCommand(workspace: Path): Path {
     }
 }
 
-private fun readDependenciesViaGradleCLI(projectDirectory: Path, gradleScripts: List<String>, gradleTasks: List<String>): Set<Path> {
+private fun readDependenciesViaGradleCLI(projectDirectory: Path, gradleScripts: List<String>, gradleTasks: List<String>): Set<ClassPathEntry> {
     LOG.info("Resolving dependencies for '{}' through Gradle's CLI using tasks {}...", projectDirectory.fileName, gradleTasks)
 
     val tmpScripts = gradleScripts.map { gradleScriptToTempFile(it, deleteOnExit = false).toPath().toAbsolutePath() }
@@ -81,16 +83,16 @@ private fun readDependenciesViaGradleCLI(projectDirectory: Path, gradleScripts: 
 
     val command = listOf(gradle.toString()) + tmpScripts.flatMap { listOf("-I", it.toString()) } + gradleTasks + listOf("--console=plain")
     val dependencies = findGradleCLIDependencies(command, projectDirectory)
-        ?.also { LOG.debug("Classpath for task {}", it) }
+        ?.also { LOG.info("Classpath for task {}", it) }
         .orEmpty()
-        .filter { it.toString().lowercase().endsWith(".jar") || Files.isDirectory(it) } // Some Gradle plugins seem to cause this to output POMs, therefore filter JARs
+        .filter { it.compiledJar.toString().lowercase().endsWith(".jar") || Files.isDirectory(it.compiledJar) } // Some Gradle plugins seem to cause this to output POMs, therefore filter JARs
         .toSet()
 
     tmpScripts.forEach(Files::delete)
     return dependencies
 }
 
-private fun findGradleCLIDependencies(command: List<String>, projectDirectory: Path): Set<Path>? {
+private fun findGradleCLIDependencies(command: List<String>, projectDirectory: Path): Set<ClassPathEntry>? {
     val (result, errors) = execAndReadStdoutAndStderr(command, projectDirectory)
     if ("FAILURE: Build failed" in errors) {
         LOG.warn("Gradle task failed: {}", errors)
@@ -104,13 +106,29 @@ private fun findGradleCLIDependencies(command: List<String>, projectDirectory: P
     return parseGradleCLIDependencies(result)
 }
 
-private val artifactPattern by lazy { "kotlin-lsp-gradle (.+)(?:\r?\n)".toRegex() }
+private val artifactWithoutSourcesPattern by lazy { "kotlin-lsp-gradle (.+)(?:\r?\n)".toRegex() }
+private val artifactWithSourcesPattern by lazy { "kotlin-lsp-gradle-src (.+)\\|(.+)(?:\r?\n)".toRegex() }
 private val gradleErrorWherePattern by lazy { "\\*\\s+Where:[\r\n]+(\\S\\.*)".toRegex() }
 
-private fun parseGradleCLIDependencies(output: String): Set<Path>? {
+private fun parseGradleCLIDependencies(output: String): Set<ClassPathEntry>? {
     LOG.debug(output)
-    val artifacts = artifactPattern.findAll(output)
-        .mapNotNull { Paths.get(it.groups[1]?.value) }
-        .filterNotNull()
-    return artifacts.toSet()
+    val artifactsWithoutSources = artifactWithoutSourcesPattern.findAll(output)
+        .mapNotNull {
+            it.groups[1]?.value?.let {
+                ClassPathEntry(compiledJar = Paths.get(it))
+            }
+        }
+        .toSet()
+    val artifactsWithSources = artifactWithSourcesPattern.findAll(output)
+        .mapNotNull {
+            val sourceJar = it.groups[2]?.value
+            it.groups[1]?.value?.let {
+                ClassPathEntry(
+                    compiledJar = Paths.get(it),
+                    sourceJar = sourceJar?.let { Paths.get(it) },
+                )
+            }
+        }
+        .toSet()
+    return artifactsWithoutSources + artifactsWithSources
 }

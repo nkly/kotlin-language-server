@@ -51,10 +51,43 @@ allprojects { project ->
                     }
                 }
             } else if (project.hasProperty('sourceSets')) {
-                // Print the list of all dependencies jar files.
+                // Collect all third-party dependencies
+                def allDeps = [:]
+                def allBins = [] as Set
+                configurations.forEach {
+                    if (it.canBeResolved) {
+                        it.incoming.artifacts.artifacts.forEach {
+                            allDeps[it.id.componentIdentifier] = it.file
+                            allBins = allBins + it.file
+                        }
+                    }
+                }
+
+                // Print inter-project dependencies, but not third-party ones yet
                 sourceSets.forEach {
                     it.compileClasspath.forEach {
-                        System.out.println "kotlin-lsp-gradle $it"
+                        if (!allBins.contains(it)) {
+                            System.out.println "kotlin-lsp-gradle $it"
+                        }
+                    }
+                }
+
+                // Resolve sources for third-party dependencies
+                def result = dependencies
+                    .createArtifactResolutionQuery()
+                    .forComponents(allDeps.keySet())
+                    .withArtifacts(JvmLibrary, SourcesArtifact)
+                    .execute()
+
+                // Print third-party dependencies with sources
+                for (component in result.resolvedComponents) {
+                    def bin = allDeps[component.id]
+                    def srcs = component.getArtifacts(SourcesArtifact).collect { it.file }
+                    if (!srcs.isEmpty()) {
+                        def src = srcs.head()
+                        System.out.println "kotlin-lsp-gradle-src $bin|$src"
+                    } else {
+                        System.out.println "kotlin-lsp-gradle $bin"
                     }
                 }
             }
